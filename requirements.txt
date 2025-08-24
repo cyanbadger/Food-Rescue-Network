@@ -3,3 +3,6 @@ pandas
 openpyxl
 matplotlib
 google-search-results
+twilio
+sendgrid
+
