@@ -4,35 +4,13 @@ import random
 from datetime import datetime, timedelta, date
 import matplotlib.pyplot as plt
 import os
-from serpapi import GoogleSearch
+import requests
+
 from openpyxl.workbook import Workbook
+from twilio.rest import Client
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
-#---API-KEY---
-api_key= "90f4243c6a539b9b8cfd9c9ae521ae07982bc66af363056ba92f7dc90e5e62d5"
-SEARCH_ENGINE_URL = "https://serpapi.com/search"
-
-#---fetch location---
-def fetch_location_from_serpapi(query):
-    """Fetch Google Maps link for the restaurant using SerpAPI"""
-    params = {
-        "engine": "google_maps",
-        "q": query,
-        "api_key": api_key
-    }
-    response = requests.get(SEARCH_ENGINE_URL, params=params)
-    data = response.json()
-
-    if "local_results" in data and len(data["local_results"]) > 0:
-        result = data["local_results"][0]
-        name = result.get("title", "Unknown")
-        address = result.get("address", "No address found")
-        maps_url = result.get("gps_coordinates", None)
-        lat, lng = None, None
-        if maps_url:
-            lat, lng = maps_url.get("latitude"), maps_url.get("longitude")
-        return name, address, lat, lng
-    else:
-        return None, None, None, None
 # --- FILE STORAGE ---
 FILE_PATH = "food_posts_100.xlsx"
 ACCOUNTS_FILE = "accounts.xlsx"
@@ -72,12 +50,13 @@ else:
         "name","email","password","phone","organization","role"
     ])
     accounts_df.to_excel(ACCOUNTS_FILE, index=False)
+
 def save_accounts_db():
     accounts_df.to_excel(ACCOUNTS_FILE, index=False)
 
 # --- SESSION STATE ---
 if "stage" not in st.session_state:
-    st.session_state.stage = "role"   # role -> form -> otp -> login -> dashboard
+    st.session_state.stage = "role"
 if "user_data" not in st.session_state:
     st.session_state.user_data = {}
 if "otp" not in st.session_state:
@@ -117,16 +96,34 @@ def dashboard_header(title):
     if col2.button("Logout"):
         logout()
 
-# --- OTP SECTION ---
-def send_otp_via_email(email, otp):
-    # Simulated sending (use SMTP in real case)
-    st.info(f"📧 OTP has been sent to your email: {email} (Simulated)")
-    print(f"OTP for {email}: {otp}")  # Debugging/logging
-
+# --- REAL OTP SECTION ---
 def send_otp_via_phone(phone, otp):
-    # Simulated sending (use Twilio in real case)
-    st.info(f"📱 OTP has been sent to your phone: {phone} (Simulated)")
-    print(f"OTP for {phone}: {otp}")
+    """Send OTP via Twilio SMS"""
+    try:
+        client = Client(st.secrets["TWILIO_SID"], st.secrets["TWILIO_AUTH"])
+        verification = client.verify.services(st.secrets["TWILIO_SERVICE_SID"]) \
+            .verifications.create(to=phone, channel="sms")
+        st.success(f"📱 OTP sent to {phone}")
+    except Exception as e:
+        st.error(f"Failed to send OTP via phone: {e}")
+
+def send_otp_via_email(email, otp):
+    """Send OTP via SendGrid Email"""
+    try:
+        message = Mail(
+            from_email=st.secrets["FROM_EMAIL"],
+            to_emails=email,
+            subject="Your OTP Code",
+            plain_text_content=f"Your OTP is: {otp}"
+        )
+        sg = SendGridAPIClient(st.secrets["SENDGRID_API_KEY"])
+        response = sg.send(message)
+        if response.status_code in [200, 202]:
+            st.success(f"📧 OTP sent to {email}")
+        else:
+            st.error(f"SendGrid failed: {response.status_code}")
+    except Exception as e:
+        st.error(f"Failed to send OTP via email: {e}")
 
 def otp_verification_flow():
     st.subheader("🔐 OTP Verification")
@@ -208,7 +205,6 @@ def ngo_page():
             expiry_str = pd.to_datetime(row['expiry_time']).strftime("%b %d, %I:%M %p")
             expires_in = pd.to_datetime(row['expiry_time']) - now
 
-            # --- Styled card container ---
             with st.container():
                 st.markdown(
                     f"""
@@ -228,7 +224,6 @@ def ngo_page():
                     unsafe_allow_html=True
                 )
 
-                # Claim button
                 if st.button(f"✅ Claim {row['food_item']} (ID: {row['id']})", key=f"claim_{row['id']}"):
                     df.loc[df["id"] == row["id"], "status"] = "Claimed"
                     df.loc[df["id"] == row["id"], "claimed_by"] = st.session_state.user_data["email"]
@@ -241,7 +236,6 @@ def ngo_page():
 # --- ADMIN DASHBOARD ---
 def admin_page():
     dashboard_header("🛡 Admin Dashboard")
-
     if df.empty:
         st.info("No food posts yet.")
     else:
@@ -275,7 +269,7 @@ def admin_page():
                 st.success("🗑 Food post deleted!")
                 st.rerun()
 
-# --- STAGE 1: Select Role ---
+# --- STAGES ---
 if st.session_state.stage == "role":
     st.title("Food Rescue Network - Welcome")
     role = st.radio("Continue as:", ["Provider (Restaurant)", "Receiver (NGO / Volunteer)", "Admin"])
@@ -288,7 +282,6 @@ if st.session_state.stage == "role":
             st.session_state.stage = "form"
         st.rerun()
 
-# --- STAGE 2: Registration Form (Restaurant/NGO) ---
 elif st.session_state.stage == "form":
     st.title("📝 Account Registration")
 
@@ -314,7 +307,6 @@ elif st.session_state.stage == "form":
                     "role": st.session_state.user_data["role"]
                 }
                 st.session_state.user_data = new_account
-                #st.session_state.accounts[email] = new_account
                 accounts_df.loc[len(accounts_df)] = new_account
                 save_accounts_db()
                 st.session_state.stage = "otp"
@@ -325,13 +317,14 @@ elif st.session_state.stage == "form":
     if st.button("Go to Login"):
         st.session_state.stage = "login"
         st.rerun()
+
 elif st.session_state.stage == "otp":
     otp_verification_flow()
 
-# --- STAGE 3: Login Page ---
 elif st.session_state.stage == "login":
     st.title("🔑 Login to Food Rescue")
     login_tab,forgot_tab = st.tabs(["login","Forgot Password"])
+
     with login_tab:
         email = st.text_input("📧 Email",key = "login_email")
         password = st.text_input("🔑 Password", type="password",key="login_pass")
@@ -344,7 +337,7 @@ elif st.session_state.stage == "login":
                 st.rerun()
             else:
                 st.error("❌ Invalid email or password.")
-    # FORGOT PASSWORD TAB
+
     with forgot_tab:
         phone = st.text_input("📱 Registered Phone Number", key="forgot_phone")
         new_password = st.text_input("🔑 New Password", type="password", key="forgot_pass")
@@ -366,7 +359,6 @@ elif st.session_state.stage == "login":
         st.session_state.stage = "role"
         st.rerun()
 
-# --- STAGE 4: DASHBOARDS ---
 elif st.session_state.stage == "dashboard":
     role = st.session_state.user_data["role"]
     if role == "Admin":
