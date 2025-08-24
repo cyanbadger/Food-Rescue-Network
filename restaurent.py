@@ -1,16 +1,38 @@
 import streamlit as st
 import pandas as pd
-import random
 from datetime import datetime, timedelta, date
 import matplotlib.pyplot as plt
 import os
-import requests
-
+from serpapi import GoogleSearch
 from openpyxl.workbook import Workbook
-from twilio.rest import Client
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
+#---API-KEY---
+api_key= "90f4243c6a539b9b8cfd9c9ae521ae07982bc66af363056ba92f7dc90e5e62d5"
+SEARCH_ENGINE_URL = "https://serpapi.com/search"
+
+#---fetch location---
+
+def fetch_location_from_serpapi(query):
+    """Fetch Google Maps link for the restaurant using SerpAPI"""
+    params = {
+        "engine": "google_maps",
+        "q": query,
+        "api_key": api_key
+    }
+    response = requests.get(SEARCH_ENGINE_URL, params=params)
+    data = response.json()
+
+    if "local_results" in data and len(data["local_results"]) > 0:
+        result = data["local_results"][0]
+        name = result.get("title", "Unknown")
+        address = result.get("address", "No address found")
+        maps_url = result.get("gps_coordinates", None)
+        lat, lng = None, None
+        if maps_url:
+            lat, lng = maps_url.get("latitude"), maps_url.get("longitude")
+        return name, address, lat, lng
+    else:
+        return None, None, None, None
 # --- FILE STORAGE ---
 FILE_PATH = "food_posts_100.xlsx"
 ACCOUNTS_FILE = "accounts.xlsx"
@@ -29,18 +51,16 @@ def save_food_db():
 st.set_page_config(page_title="Food Rescue Network", page_icon="🥗", layout="centered")
 
 #---background---
-page_bg_img = """
+page_bg_img = '''
 <style>
-[data-testid="stAppViewContainer"] {
-    background-image: url("https://plus.unsplash.com//premium_photo-1674106347537-f0b19d647413?q=80&w=1170&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D");
-    background-size: cover;
-    background-repeat: no-repeat;
-    background-attachment: fixed;
+.stApp {
+background-image: url("https://plus.unsplash.com//premium_photo-1670601440146-3b33dfcd7e17?q=80&w=2138&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D");
+background-size: cover;
+background-attachment: fixed;
 }
 </style>
-"""
+'''
 st.markdown(page_bg_img, unsafe_allow_html=True)
-
 
 #---ACCOUNTS DATABASE---
 if os.path.exists(ACCOUNTS_FILE):
@@ -50,21 +70,16 @@ else:
         "name","email","password","phone","organization","role"
     ])
     accounts_df.to_excel(ACCOUNTS_FILE, index=False)
-
 def save_accounts_db():
     accounts_df.to_excel(ACCOUNTS_FILE, index=False)
 
 # --- SESSION STATE ---
 if "stage" not in st.session_state:
-    st.session_state.stage = "role"
+    st.session_state.stage = "role"   # role -> form/login -> dashboard
 if "user_data" not in st.session_state:
     st.session_state.user_data = {}
-if "otp" not in st.session_state:
-    st.session_state.otp = None
-if "otp_verified" not in st.session_state:
-    st.session_state.otp_verified = False
 if "accounts" not in st.session_state:
-    st.session_state.accounts = {row["email"]: row.to_dict() for _,row in accounts_df.iterrows()}
+    st.session_state.accounts = {row["email"]: row.to_dict() for _,row in accounts_df.iterrows()}  # email -> user_data
 
 # --- PRE-DEFINED ADMIN ACCOUNT ---
 ADMIN_EMAIL = "admin@foodrescue.com"
@@ -86,7 +101,6 @@ if ADMIN_EMAIL not in st.session_state.accounts:
 def logout():
     st.session_state.stage = "role"
     st.session_state.user_data = {}
-    st.session_state.otp_verified = False
     st.rerun()
 
 # --- DASHBOARD HEADER ---
@@ -96,60 +110,10 @@ def dashboard_header(title):
     if col2.button("Logout"):
         logout()
 
-# --- REAL OTP SECTION ---
-def send_otp_via_phone(phone, otp):
-    """Send OTP via Twilio SMS"""
-    try:
-        client = Client(st.secrets["TWILIO_SID"], st.secrets["TWILIO_AUTH"])
-        verification = client.verify.services(st.secrets["TWILIO_SERVICE_SID"]) \
-            .verifications.create(to=phone, channel="sms")
-        st.success(f"📱 OTP sent to {phone}")
-    except Exception as e:
-        st.error(f"Failed to send OTP via phone: {e}")
-
-def send_otp_via_email(email, otp):
-    """Send OTP via SendGrid Email"""
-    try:
-        message = Mail(
-            from_email=st.secrets["FROM_EMAIL"],
-            to_emails=email,
-            subject="Your OTP Code",
-            plain_text_content=f"Your OTP is: {otp}"
-        )
-        sg = SendGridAPIClient(st.secrets["SENDGRID_API_KEY"])
-        response = sg.send(message)
-        if response.status_code in [200, 202]:
-            st.success(f"📧 OTP sent to {email}")
-        else:
-            st.error(f"SendGrid failed: {response.status_code}")
-    except Exception as e:
-        st.error(f"Failed to send OTP via email: {e}")
-
-def otp_verification_flow():
-    st.subheader("🔐 OTP Verification")
-    otp_choice = st.radio("Receive OTP via:", ["Email", "Phone"])
-    if st.button("Send OTP"):
-        otp = str(random.randint(1000, 9999))
-        st.session_state.otp = otp
-        if otp_choice == "Email":
-            send_otp_via_email(st.session_state.user_data["email"], otp)
-        else:
-            send_otp_via_phone(st.session_state.user_data["phone"], otp)
-
-    if st.session_state.otp:
-        entered = st.text_input("Enter OTP")
-        if st.button("Verify OTP"):
-            if entered == st.session_state.otp:
-                st.session_state.otp_verified = True
-                st.success("✅ OTP Verified! Account Created.")
-                st.session_state.stage = "dashboard"
-                st.rerun()
-            else:
-                st.error("❌ Invalid OTP")
-
 # --- RESTAURANT DASHBOARD ---
 def restaurant_page():
     dashboard_header("🏪 Restaurant Owner Dashboard")
+
     st.subheader("📌 Post Surplus Food")
     with st.form("post_form", clear_on_submit=True):
         restaurant = st.text_input("Restaurant Name",value = st.session_state.user_data["organization"])
@@ -205,15 +169,16 @@ def ngo_page():
             expiry_str = pd.to_datetime(row['expiry_time']).strftime("%b %d, %I:%M %p")
             expires_in = pd.to_datetime(row['expiry_time']) - now
 
+            # --- Styled card container ---
             with st.container():
                 st.markdown(
                     f"""
                     <div style="
-                        background-color: rgba(255,255,255,0.85);
+                        background-color: rgba(0,0,0,1);
                         padding: 15px;
                         border-radius: 12px;
                         margin-bottom: 12px;
-                        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                        box-shadow: 0 2px 6px rgba(0,0,0,1);
                     ">
                         <b>{row['food_item']}</b> from <i>{row['restaurant']}</i><br>
                         📦 Qty: {row['quantity']} <br>
@@ -224,6 +189,7 @@ def ngo_page():
                     unsafe_allow_html=True
                 )
 
+                # Claim button
                 if st.button(f"✅ Claim {row['food_item']} (ID: {row['id']})", key=f"claim_{row['id']}"):
                     df.loc[df["id"] == row["id"], "status"] = "Claimed"
                     df.loc[df["id"] == row["id"], "claimed_by"] = st.session_state.user_data["email"]
@@ -236,6 +202,7 @@ def ngo_page():
 # --- ADMIN DASHBOARD ---
 def admin_page():
     dashboard_header("🛡 Admin Dashboard")
+
     if df.empty:
         st.info("No food posts yet.")
     else:
@@ -269,7 +236,7 @@ def admin_page():
                 st.success("🗑 Food post deleted!")
                 st.rerun()
 
-# --- STAGES ---
+# --- STAGE 1: Select Role ---
 if st.session_state.stage == "role":
     st.title("Food Rescue Network - Welcome")
     role = st.radio("Continue as:", ["Provider (Restaurant)", "Receiver (NGO / Volunteer)", "Admin"])
@@ -282,6 +249,7 @@ if st.session_state.stage == "role":
             st.session_state.stage = "form"
         st.rerun()
 
+# --- STAGE 2: Registration Form (Restaurant/NGO) ---
 elif st.session_state.stage == "form":
     st.title("📝 Account Registration")
 
@@ -307,9 +275,10 @@ elif st.session_state.stage == "form":
                     "role": st.session_state.user_data["role"]
                 }
                 st.session_state.user_data = new_account
+                st.session_state.accounts[email] = new_account
                 accounts_df.loc[len(accounts_df)] = new_account
                 save_accounts_db()
-                st.session_state.stage = "otp"
+                st.session_state.stage = "dashboard"
                 st.rerun()
         else:
             st.error("⚠ Please fill in all fields.")
@@ -318,13 +287,10 @@ elif st.session_state.stage == "form":
         st.session_state.stage = "login"
         st.rerun()
 
-elif st.session_state.stage == "otp":
-    otp_verification_flow()
-
+# --- STAGE 3: Login Page ---
 elif st.session_state.stage == "login":
     st.title("🔑 Login to Food Rescue")
     login_tab,forgot_tab = st.tabs(["login","Forgot Password"])
-
     with login_tab:
         email = st.text_input("📧 Email",key = "login_email")
         password = st.text_input("🔑 Password", type="password",key="login_pass")
@@ -337,7 +303,7 @@ elif st.session_state.stage == "login":
                 st.rerun()
             else:
                 st.error("❌ Invalid email or password.")
-
+    # FORGOT PASSWORD TAB
     with forgot_tab:
         phone = st.text_input("📱 Registered Phone Number", key="forgot_phone")
         new_password = st.text_input("🔑 New Password", type="password", key="forgot_pass")
@@ -359,6 +325,7 @@ elif st.session_state.stage == "login":
         st.session_state.stage = "role"
         st.rerun()
 
+# --- STAGE 4: DASHBOARDS ---
 elif st.session_state.stage == "dashboard":
     role = st.session_state.user_data["role"]
     if role == "Admin":
